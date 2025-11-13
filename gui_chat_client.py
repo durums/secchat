@@ -1,4 +1,4 @@
-
+# gui_chat_client.py
 import asyncio
 import threading
 import json
@@ -62,6 +62,10 @@ class ChatApp:
         self.status_var = ttk.StringVar(value="Nicht verbunden")
         self.btn_connect: Optional[ttk.Button] = None
 
+        # Neu: UI-Elemente für Kontakte
+        self.contact_entry: Optional[ttk.Entry] = None
+        self.btn_add_contact: Optional[ttk.Button] = None
+
         # Build UI
         self.build_login_ui()
 
@@ -80,7 +84,7 @@ class ChatApp:
         grid = ttk.Frame(self.frame_login)
         grid.pack()
 
-        ttk.Label(grid, text="E‑Mail:").grid(row=0, column=0, sticky=W, padx=(0, 8), pady=6)
+        ttk.Label(grid, text="E-Mail:").grid(row=0, column=0, sticky=W, padx=(0, 8), pady=6)
         self.email_entry = ttk.Entry(grid, width=32)
         self.email_entry.insert(0, "user@example.com")
         self.email_entry.grid(row=0, column=1, pady=6)
@@ -122,14 +126,37 @@ class ChatApp:
         left.pack(side=LEFT, fill=Y)
         left.configure(style="left.TFrame")
 
-        ttk.Label(left, text="📇 Kontakte", font=("Helvetica", 10, "bold"), foreground=GOLDEN_UMBER).pack(pady=6)
+        ttk.Label(left, text="📇 Kontakte", font=("Helvetica", 10, "bold"), foreground=GOLDEN_UMBER).pack(pady=(6, 2))
+
+       
+        # --- Neues Kontakt-Formular ---
+        frm = ttk.Frame(left)
+        frm.pack(fill=X, padx=8, pady=6)
+
+        ttk.Label(frm, text="Vorname:").pack(anchor="w")
+        self.contact_first = ttk.Entry(frm)
+        self.contact_first.pack(fill=X)
+
+        ttk.Label(frm, text="Nachname:").pack(anchor="w")
+        self.contact_last = ttk.Entry(frm)
+        self.contact_last.pack(fill=X)
+
+        ttk.Label(frm, text="E-Mail:").pack(anchor="w")
+        self.contact_mail = ttk.Entry(frm)
+        self.contact_mail.pack(fill=X)
+
+        self.btn_add_contact = ttk.Button(frm, text="➕ Kontakt hinzufügen",
+                                        bootstyle=SUCCESS, command=self.add_contact)
+        self.btn_add_contact.pack(pady=4)
+
+
         self.contact_list = ttk.Treeview(left, show="tree")
         self.contact_list.pack(fill=BOTH, expand=True, padx=8, pady=(0, 8))
         self.contact_list.bind("<<TreeviewSelect>>", self.on_select_chat)
 
-        for user in ["Allgemein (Gruppe)", "Alice", "Bob"]:
-            self.contact_list.insert("", "end", text=user)
-        self.contact_list.selection_set(self.contact_list.get_children()[0])
+        # Öffentlicher Raum; echte Kontakte kommen vom Server
+        self.contact_list.insert("", "end", iid="__public__", text="Allgemein (Gruppe)")
+        self.contact_list.selection_set("__public__")
 
         # Right: Chat area
         right = ttk.Frame(self.frame_chat)
@@ -238,7 +265,7 @@ class ChatApp:
                 hostport = self.identity.uri.replace("ws://", "")
                 if not check_known_host(hostport, srv_pub_b64):
                     # GUI: automatisch akzeptieren, aber klar anzeigen
-                    self.log_system(f"[TOFU] Neuer Server‑Key erkannt für {hostport} – akzeptiert und gespeichert.")
+                    self.log_system(f"[TOFU] Neuer Server-Key erkannt für {hostport} – akzeptiert und gespeichert.")
                     save_known_host(hostport, srv_pub_b64)
 
                 self.aes_key = derive_aes_key(our_priv, srv_pub)
@@ -247,13 +274,49 @@ class ChatApp:
                 self._set_send_enabled(True)
                 self.log_system("[Sicher] Sitzung hergestellt.")
 
+                # Neu: Kontakte beim Start laden (nach Auth auf Serverseite)
+                self._send_json_encrypted({"type": "contacts_list"})
+
                 async for msg in ws:
                     if isinstance(msg, bytes):
                         try:
                             pt = decrypt_message(self.aes_key, msg)
                             obj = json.loads(pt.decode("utf8"))
-                            if obj.get("type") == "text":
+
+                            # --- Chat & Kontakt-Handling ---
+                            t = obj.get("type")
+
+                            if t == "text":
                                 self.add_message(obj.get("from"), obj.get("body"))
+                                continue
+
+                            if t == "contacts_list":
+                                items = obj.get("items", [])
+                                self._populate_contacts(items)
+                                self.log_system(f"[Kontakte] {len(items)} Einträge geladen.")
+                                continue
+
+                            if t == "contacts_ok":
+                                email = obj.get("email")
+                                self.log_system(f"[Kontakt] Hinzugefügt: {email}")
+                                # Neu laden, um Namen aufzulösen
+                                self._send_json_encrypted({"type": "contacts_list"})
+                                continue
+
+                            if t == "contacts_err":
+                                reason = obj.get("reason", "unbekannt")
+                                mapping = {
+                                    "invalid_contact": "Ungültige E-Mail oder eigener Account.",
+                                    "not_found": "Benutzer nicht gefunden.",
+                                }
+                                msg_text = mapping.get(reason, f"Fehler: {reason}")
+                                self.log_system(f"[Kontakt] {msg_text}")
+                                messagebox.showerror("Kontakt hinzufügen", msg_text)
+                                continue
+
+                            # Optional: weitere Info-Typen einfach loggen
+                            self.log_system(f"[Info] {obj}")
+
                         except Exception as e:
                             self.log_system(f"[Fehler beim Entschlüsseln] {e}")
                     else:
@@ -327,15 +390,63 @@ class ChatApp:
         asyncio.run_coroutine_threadsafe(self.ws.send(data), self.loop)
         self.add_message("Du", msg)
 
+    # ---------- NEU: Helfer fürs verschlüsselte Senden von JSON ----------
+    def _send_json_encrypted(self, obj: dict):
+        """JSON-Objekt verschlüsselt an den Server senden (Thread-safe)."""
+        if not (self.ws and self.aes_key and self._connected):
+            messagebox.showwarning("Nicht verbunden", "Es besteht keine Verbindung zum Server.")
+            return
+        data = json.dumps(obj).encode("utf8")
+        asyncio.run_coroutine_threadsafe(self.ws.send(encrypt_message(self.aes_key, data)), self.loop)
+
+    # ---------- NEU: Kontaktliste füllen ----------
+    def _populate_contacts(self, items):
+        # Alles außer dem öffentlichen Raum löschen
+        for iid in list(self.contact_list.get_children()):
+            if iid != "__public__":
+                self.contact_list.delete(iid)
+        # Neue Kontakte einsetzen
+        for item in items:
+            email = item.get('email') or ''
+            name = item.get('name') or (email.split('@')[0] if email else 'Unbekannt')
+            first = item.get("first", "")
+            last  = item.get("last", "")
+            email = item.get("email", "")
+            label = f"{first} {last} <{email}>"
+            self.contact_list.insert("", "end", text=label)
+
+        # ---------- NEU: Kontakt hinzufügen ----------
+    def add_contact(self):
+        first = (self.contact_first.get() or "").strip()
+        last  = (self.contact_last.get() or "").strip()
+        email = (self.contact_mail.get() or "").strip().lower()
+
+        if not (first and last and email):
+            messagebox.showerror("Kontakt hinzufügen", "Bitte alle Felder ausfüllen.")
+            return
+
+        self._send_json_encrypted({
+            "type": "contacts_add",
+            "email": email,
+            "first": first,
+            "last": last
+        })
+
+        self.contact_first.delete(0, "end")
+        self.contact_last.delete(0, "end")
+        self.contact_mail.delete(0, "end")
     def on_close(self):
-        # Signal background tasks to stop and close websocket
+        # Hintergrund-Tasks stoppen
         self._stop_event.set()
+
+        # Websocket sauber schließen
         if self.ws is not None:
             try:
                 asyncio.run_coroutine_threadsafe(self.ws.close(), self.loop)
             except Exception:
                 pass
-        # Give the loop a moment to process close
+
+        # GUI schließen
         try:
             self.root.after(150, self.root.destroy)
         except Exception:
