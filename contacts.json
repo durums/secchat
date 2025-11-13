@@ -1,0 +1,16 @@
+{
+  "alice@example.com": [
+    {
+      "email": "bob@example.com",
+      "first": "Bob",
+      "last": "Müller"
+    }
+  ],
+  "bob@example.com": [
+    {
+      "email": "alice@example.com",
+      "first": "Alice",
+      "last": "Schmidt"
+    }
+  ]
+}
