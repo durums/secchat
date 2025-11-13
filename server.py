@@ -189,23 +189,42 @@ async def handle_connection(ws):
             if t == 'contacts_list':
                 lst = contacts.get(me_email, [])
                 # reiche Namen aus users nach
-                items = [{'email':e, 'name': users.get(e,{}).get('name', e.split('@')[0])} for e in lst]
+                items = lst
                 await send(ws, aes_key, {'type':'contacts_list','items':items})
                 continue
 
             if t == 'contacts_add':
                 target = (m.get('email') or '').strip().lower()
-                if not _valid_email(target) or target == me_email:
-                    await send(ws, aes_key, {'type':'contacts_err','reason':'invalid_contact'}); continue
+                first  = (m.get('first') or "").strip()
+                last   = (m.get('last') or "").strip()
+
+                if not (_valid_email(target)) or target == me_email:
+                    await send(ws, aes_key, {'type':'contacts_err','reason':'invalid_contact'})
+                    continue
+
                 if target not in users:
-                    await send(ws, aes_key, {'type':'contacts_err','reason':'not_found'}); continue
+                    await send(ws, aes_key, {'type':'contacts_err','reason':'not_found'})
+                    continue
+
+                entry = {"email": target, "first": first, "last": last}
+
                 cur = contacts.get(me_email, [])
-                if target not in cur:
-                    cur.append(target)
+                
+                # Prüfen, ob bereits existiert
+                if not any(c["email"] == target for c in cur):
+                    cur.append(entry)
                     contacts[me_email] = cur
                     save_contacts(contacts)
-                await send(ws, aes_key, {'type':'contacts_ok','email':target})
+
+                await send(ws, aes_key, {
+                    'type':'contacts_ok',
+                    'email': target,
+                    'first': first,
+                    'last': last
+                })
                 continue
+
+
 
             # ---- Direct Message (DM) ----
             if t == 'dm':
